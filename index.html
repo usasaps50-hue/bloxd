@@ -1185,36 +1185,159 @@ let held = null; // マウスで掴んでいるアイテム（{id,count} か nul
 //   { t:'block', x,y,z, id }                    ブロック設置/破壊(id=0で破壊)
 //   { t:'pose',  id, name, x,y,z, yaw }         プレイヤーの位置・向き
 // ============================================================
-const remotePlayers = new Map(); // id -> { group }
+const remotePlayers = new Map(); // id -> { group, target, yaw, pitch, moving, mining, ... }
 
-// 他プレイヤーの簡易アバター（胴体＋頭）
-function makeAvatar(color = 0xff5a5a) {
-  const g = new THREE.Group();
-  const body = new THREE.Mesh(
-    new THREE.BoxGeometry(0.6, 1.1, 0.3),
+// ------------------------------------------------------------
+//  人型アバター（頭・胴・両腕・両脚）を作る。手足は「肩/腰」を軸に
+//  回転できるよう、ピボット用 Group の中にメッシュをぶら下げて配置する。
+//  → これで歩行・採掘モーションを付けられる。足元(y=0)基準。
+// ------------------------------------------------------------
+function makeLimb(w, h, d, color, px, py, pz) {
+  const pivot = new THREE.Group();
+  pivot.position.set(px, py, pz);            // 肩 or 腰の位置
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(w, h, d),
     new THREE.MeshBasicMaterial({ color })
   );
-  body.position.y = 0.95;
-  g.add(body);
-  const head = new THREE.Mesh(
-    new THREE.BoxGeometry(0.5, 0.5, 0.5),
-    new THREE.MeshBasicMaterial({ color: 0xf0c8a0 })
+  mesh.position.y = -h / 2;                   // ピボットからぶら下げる
+  pivot.add(mesh);
+  return pivot;
+}
+
+// id から安定した色を作る（プレイヤーごとに見分けやすく）
+function colorFromId(id) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return new THREE.Color(`hsl(${h % 360},65%,55%)`).getHex();
+}
+
+function makeAvatar(shirt = 0xff5a5a) {
+  const g = new THREE.Group();
+  const skin = 0xf0c8a0, pants = 0x3b5bdb;
+
+  // 脚（腰 y=0.75 を軸に）
+  const lleg = makeLimb(0.22, 0.75, 0.28, pants, -0.13, 0.75, 0);
+  const rleg = makeLimb(0.22, 0.75, 0.28, pants,  0.13, 0.75, 0);
+  // 胴（y 0.75→1.45）
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(0.55, 0.7, 0.3),
+    new THREE.MeshBasicMaterial({ color: shirt })
   );
-  head.position.y = 1.75;
-  g.add(head);
+  body.position.y = 1.1;
+  // 腕（肩 y=1.42 を軸に）
+  const larm = makeLimb(0.2, 0.7, 0.22, shirt, -0.37, 1.42, 0);
+  const rarm = makeLimb(0.2, 0.7, 0.22, shirt,  0.37, 1.42, 0);
+  // 頭（首 y=1.45 を軸に。pitch で上下を向く）
+  const head = new THREE.Group();
+  head.position.y = 1.45;
+  const headMesh = new THREE.Mesh(
+    new THREE.BoxGeometry(0.5, 0.5, 0.5),
+    new THREE.MeshBasicMaterial({ color: skin })
+  );
+  headMesh.position.y = 0.27;
+  head.add(headMesh);
+  // 顔（前=-z 側に目をつけて向きを分かりやすく）
+  const eyeMat = new THREE.MeshBasicMaterial({ color: 0x222222 });
+  for (const sx of [-0.1, 0.1]) {
+    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.02), eyeMat);
+    eye.position.set(sx, 0.3, -0.26);
+    head.add(eye);
+  }
+
+  g.add(lleg, rleg, body, larm, rarm, head);
+  g.userData.parts = { head, body, larm, rarm, lleg, rleg };
+  g.userData.anim = { phase: 0, amt: 0, mineT: 0, curYaw: 0 };
   scene.add(g);
   return g;
 }
+
+// 角度の最短経路 lerp（向きを滑らかに回す）
+function lerpAngle(a, b, t) {
+  let d = ((b - a + Math.PI) % (Math.PI * 2)) - Math.PI;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
+
+// アバターのモーションを1フレーム進める。
+//  st = { yaw, pitch, moving, speed, mining }
+function animateAvatar(g, dt, st) {
+  const p = g.userData.parts, a = g.userData.anim;
+  g.rotation.y = st.yaw || 0;
+  p.head.rotation.x = -(st.pitch || 0);          // 上下を向く
+
+  // 歩行：腕脚を交互に振る。動いていない時は振り幅を 0 へ滑らかに戻す
+  a.amt += ((st.moving ? 1 : 0) - a.amt) * Math.min(1, dt * 10);
+  a.phase += dt * (8 + Math.min(6, (st.speed || 0)));
+  const s = Math.sin(a.phase) * 0.9 * a.amt;
+  p.lleg.rotation.x = s;
+  p.rleg.rotation.x = -s;
+  p.larm.rotation.x = -s;
+  p.rarm.rotation.x = s;
+  p.larm.rotation.z = 0;
+  p.rarm.rotation.z = 0;
+
+  // 採掘：右腕を振り上げて振り下ろす（歩行の腕振りを上書き）
+  if (st.mining) {
+    a.mineT += dt;
+    const chop = Math.sin(a.mineT * 16) * 0.5 + 0.5; // 0..1
+    p.rarm.rotation.x = 2.4 - chop * 1.4;            // 上→下を繰り返す
+    p.rarm.rotation.z = 0.15;
+  } else {
+    a.mineT = 0;
+  }
+}
+
 function upsertRemotePlayer(id, state) {
   let rp = remotePlayers.get(id);
-  if (!rp) { rp = { group: makeAvatar() }; remotePlayers.set(id, rp); }
-  rp.group.position.set(state.x, state.y, state.z); // 足元基準
-  rp.group.rotation.y = state.yaw || 0;
-  rp.lastSeen = performance.now();                  // 生存確認（しばらく来なければ消す）
+  if (!rp) {
+    rp = { group: makeAvatar(colorFromId(id)) };
+    rp.group.position.set(state.x, state.y, state.z);
+    rp.group.userData.anim.curYaw = state.yaw || 0;
+    remotePlayers.set(id, rp);
+  }
+  rp.target = { x: state.x, y: state.y, z: state.z }; // 補間先（足元基準）
+  rp.yaw = state.yaw || 0;
+  rp.pitch = state.pitch || 0;
+  rp.speed = state.mv || 0;
+  rp.moving = rp.speed > 0.5;
+  rp.mining = !!state.mn;
+  rp.lastSeen = performance.now();                    // 生存確認（しばらく来なければ消す）
 }
+
+// 毎フレーム：受信した位置/向きへ滑らかに寄せつつモーションを進める
+function updateRemotePlayers(dt) {
+  const k = Math.min(1, dt * 12);
+  for (const rp of remotePlayers.values()) {
+    if (rp.target) {
+      const g = rp.group;
+      g.position.x += (rp.target.x - g.position.x) * k;
+      g.position.y += (rp.target.y - g.position.y) * k;
+      g.position.z += (rp.target.z - g.position.z) * k;
+    }
+    const a = rp.group.userData.anim;
+    a.curYaw = lerpAngle(a.curYaw, rp.yaw || 0, k);
+    animateAvatar(rp.group, dt, {
+      yaw: a.curYaw, pitch: rp.pitch, moving: rp.moving, speed: rp.speed, mining: rp.mining,
+    });
+  }
+}
+
 function removeRemotePlayer(id) {
   const rp = remotePlayers.get(id);
   if (rp) { scene.remove(rp.group); remotePlayers.delete(id); }
+}
+
+// ------------------------------------------------------------
+//  クローンモブ：自分のすぐ横に立ち、自分とまったく同じ動き
+//  （歩行・採掘・向き・上下）をリアルタイムでコピーする。
+// ------------------------------------------------------------
+const cloneMob = makeAvatar(0x66ddaa);
+function updateCloneMob(dt) {
+  cloneMob.position.set(player.pos.x + 2, player.pos.y, player.pos.z); // 真横(東2m)
+  const speed = Math.hypot(player.vel.x, player.vel.z);
+  animateAvatar(cloneMob, dt, {
+    yaw, pitch, speed, moving: speed > 0.5, mining,
+  });
 }
 
 //  Supabase Realtime を使った通信。
@@ -2042,14 +2165,20 @@ function loop(now) {
   }
   updateChunks(dt); // プレイヤー周囲のチャンクを生成・ロード・アンロード
   updateDrops(dt);
+  updateRemotePlayers(dt); // 他プレイヤーを補間＋歩行/採掘モーション
+  updateCloneMob(dt);      // 自分と同じ動きをするクローンモブ
   updateHeldView(dt); // 一人称の手／持ち物の表示・アニメ
   if (inventoryOpen && uiMode === 'furnace') { updateFurnace(dt); refreshInventoryScreen(); }
 
   // 自分の位置を一定間隔で送信（未接続時は何もしない）
   netSendTimer += dt;
-  if (netSendTimer >= 0.1) {
+  if (netSendTimer >= 0.066) {   // ~15Hz でこまめに送り、受信側で補間
     netSendTimer = 0;
-    Net.sendPlayerState({ x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw });
+    const mv = Math.hypot(player.vel.x, player.vel.z); // 水平移動速度
+    Net.sendPlayerState({
+      x: player.pos.x, y: player.pos.y, z: player.pos.z,
+      yaw, pitch, mv, mn: mining ? 1 : 0,
+    });
     // しばらく位置が来ないプレイヤー（切断/退出）はアバターを消す
     const nowMs = performance.now();
     for (const [pid, rp] of remotePlayers) if (nowMs - (rp.lastSeen || 0) > 4000) removeRemotePlayer(pid);
