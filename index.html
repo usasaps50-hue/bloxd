@@ -42,7 +42,7 @@
   #panelSkin { top: 14px; left: 14px; width: 300px; }
   #panelAccount { top: 14px; right: 14px; width: 270px; }
   #panelCenter {
-    top: 50%; left: 50%; transform: translate(-50%, -50%); width: 360px; text-align: center;
+    bottom: 22px; left: 50%; transform: translateX(-50%); width: 360px; text-align: center;
   }
   #panelCenter h1 { font-size: 40px; margin-bottom: 4px; letter-spacing: 3px; }
   #panelCenter .hint { font-size: 12px; opacity: 0.75; line-height: 1.8; margin-top: 10px; }
@@ -61,15 +61,18 @@
   .mbtn.sub { background: #3a4252; padding: 7px 10px; }
   .mbtn.sub:hover { background: #4a546a; }
   #playBtn { width: 100%; margin-top: 14px; font-size: 18px; padding: 12px; }
-  /* スキンエディタ */
-  #skinCanvas {
-    width: 100%; aspect-ratio: 1; image-rendering: pixelated; background: #555;
-    border: 2px solid rgba(255,255,255,0.2); border-radius: 6px; cursor: crosshair; touch-action: none;
+  /* スキンエディタ（3D） */
+  #editorCanvas {
+    width: 100%; aspect-ratio: 1; background: rgba(60,68,90,0.6);
+    border: 2px solid rgba(255,255,255,0.2); border-radius: 6px; cursor: crosshair; touch-action: none; display: block;
   }
+  #editorModes { display: flex; gap: 6px; margin-top: 8px; }
+  #editorModes .mode { flex: 1; }
+  .mode.sel, .brush.sel { background: #4a8f3c; }
   #palette { display: flex; flex-wrap: wrap; gap: 5px; margin: 10px 0; }
   .swatch { width: 24px; height: 24px; border-radius: 5px; cursor: pointer; border: 2px solid rgba(255,255,255,0.25); }
   .swatch.sel { border-color: #fff; transform: scale(1.12); }
-  #skinTools { display: flex; gap: 6px; }
+  #skinTools { display: flex; gap: 6px; align-items: center; }
   #accountList { font-size: 12px; opacity: 0.8; margin-top: 8px; max-height: 90px; overflow-y: auto; }
   #accountList .acc { cursor: pointer; padding: 4px 6px; border-radius: 5px; }
   #accountList .acc:hover { background: rgba(255,255,255,0.12); }
@@ -224,15 +227,21 @@
 
 <div id="overlay">
   <div id="menu">
-    <!-- 左上：スキンお絵描き -->
+    <!-- 左上：3Dスキンお絵描き -->
     <div class="mpanel" id="panelSkin">
-      <h2>🎨 スキンを描く</h2>
-      <canvas id="skinCanvas" width="16" height="16"></canvas>
+      <h2>🎨 スキン（3D）</h2>
+      <canvas id="editorCanvas"></canvas>
+      <div id="editorModes">
+        <button class="mbtn sub mode sel" id="modePaint">✏️ 描く</button>
+        <button class="mbtn sub mode" id="modeRotate">🔄 回す</button>
+      </div>
       <div id="palette"></div>
       <div id="skinTools">
-        <button class="mbtn sub" id="skinEraser">消しゴム</button>
-        <button class="mbtn sub" id="skinClear">全消し</button>
-        <button class="mbtn sub" id="skinRandom">ランダム</button>
+        <span style="font-size:12px;opacity:.8;">太さ</span>
+        <button class="mbtn sub brush" data-b="1">細</button>
+        <button class="mbtn sub brush sel" data-b="2">中</button>
+        <button class="mbtn sub brush" data-b="4">太</button>
+        <button class="mbtn sub" id="skinReset">初期に戻す</button>
       </div>
     </div>
 
@@ -1268,16 +1277,48 @@ const remotePlayers = new Map(); // id -> { group, target, yaw, pitch, moving, m
 //  回転できるよう、ピボット用 Group の中にメッシュをぶら下げて配置する。
 //  → これで歩行・採掘モーションを付けられる。足元(y=0)基準。
 // ------------------------------------------------------------
-function makeLimb(w, h, d, color, px, py, pz) {
+// 各パーツは「6面それぞれ専用キャンバス（=テクスチャ）」を持つ箱。
+//  → 3Dモデルに直接お絵描きできる（顔・体・腕・脚を別々に塗れる）。
+//  面の番号は BoxGeometry の材質順 [ +x, -x, +y, -y, +z, -z ]。前面は -z(=5)。
+const FACE_RES = 16;
+const SKIN_PARTS = ['head', 'body', 'larm', 'rarm', 'lleg', 'rleg'];
+function makeFaceMesh(w, h, d, faceColors) {
+  const canvases = [], textures = [], materials = [];
+  for (let i = 0; i < 6; i++) {
+    const cv = document.createElement('canvas'); cv.width = FACE_RES; cv.height = FACE_RES;
+    const ctx = cv.getContext('2d'); ctx.fillStyle = faceColors[i]; ctx.fillRect(0, 0, FACE_RES, FACE_RES);
+    const tex = new THREE.CanvasTexture(cv);
+    tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter; tex.colorSpace = THREE.SRGBColorSpace;
+    canvases.push(cv); textures.push(tex);
+    materials.push(new THREE.MeshBasicMaterial({ map: tex }));
+  }
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), materials);
+  mesh.userData.faceCanvases = canvases;
+  mesh.userData.faceTextures = textures;
+  return mesh;
+}
+// 手足：肩/腰を軸に回せるようピボットの中に面メッシュをぶら下げる
+function makeFaceLimb(w, h, d, colors, px, py, pz) {
   const pivot = new THREE.Group();
-  pivot.position.set(px, py, pz);            // 肩 or 腰の位置
-  const mesh = new THREE.Mesh(
-    new THREE.BoxGeometry(w, h, d),
-    new THREE.MeshBasicMaterial({ color })
-  );
-  mesh.position.y = -h / 2;                   // ピボットからぶら下げる
+  pivot.position.set(px, py, pz);
+  const mesh = makeFaceMesh(w, h, d, colors);
+  mesh.position.y = -h / 2;
   pivot.add(mesh);
+  pivot.userData.faceMesh = mesh;
   return pivot;
+}
+function hexStr(n) { return '#' + (n >>> 0).toString(16).padStart(6, '0'); }
+function partDefaultColors(part, shirt) {
+  const skin = '#f0c8a0', pants = '#3b5bdb';
+  if (part === 'body') return [shirt, shirt, shirt, shirt, shirt, shirt];
+  if (part === 'lleg' || part === 'rleg') return [pants, pants, pants, pants, pants, pants];
+  return [skin, skin, skin, skin, skin, skin]; // head / arms = 肌色
+}
+// 頭の前面(-z=5)に簡単な顔を描く
+function drawFace(cv) {
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#222'; ctx.fillRect(4, 6, 2, 2); ctx.fillRect(10, 6, 2, 2); // 目
+  ctx.fillStyle = '#a33'; ctx.fillRect(5, 11, 6, 1);                            // 口
 }
 
 // id から安定した色を作る（プレイヤーごとに見分けやすく）
@@ -1319,39 +1360,23 @@ function setNameSprite(sp, text) {
   sp.scale.set(w / 64 * 0.42 + 0.4, 0.42, 1);
 }
 
-function makeAvatar(shirt = 0xff5a5a) {
+function makeAvatar(shirtNum = 0xff5a5a, targetScene = scene) {
   const g = new THREE.Group();
-  const skin = 0xf0c8a0, pants = 0x3b5bdb;
+  const shirt = hexStr(shirtNum);
 
-  // 脚（腰 y=0.75 を軸に）
-  const lleg = makeLimb(0.22, 0.75, 0.28, pants, -0.13, 0.75, 0);
-  const rleg = makeLimb(0.22, 0.75, 0.28, pants,  0.13, 0.75, 0);
-  // 胴（y 0.75→1.45）
-  const body = new THREE.Mesh(
-    new THREE.BoxGeometry(0.55, 0.7, 0.3),
-    new THREE.MeshBasicMaterial({ color: shirt })
-  );
+  const lleg = makeFaceLimb(0.22, 0.75, 0.28, partDefaultColors('lleg', shirt), -0.13, 0.75, 0);
+  const rleg = makeFaceLimb(0.22, 0.75, 0.28, partDefaultColors('rleg', shirt),  0.13, 0.75, 0);
+  const body = makeFaceMesh(0.55, 0.7, 0.3, partDefaultColors('body', shirt));
   body.position.y = 1.1;
-  // 腕（肩 y=1.42 を軸に）
-  const larm = makeLimb(0.2, 0.7, 0.22, shirt, -0.37, 1.42, 0);
-  const rarm = makeLimb(0.2, 0.7, 0.22, shirt,  0.37, 1.42, 0);
+  const larm = makeFaceLimb(0.2, 0.7, 0.22, partDefaultColors('larm', shirt), -0.37, 1.42, 0);
+  const rarm = makeFaceLimb(0.2, 0.7, 0.22, partDefaultColors('rarm', shirt),  0.37, 1.42, 0);
   // 頭（首 y=1.45 を軸に。pitch で上下を向く）
   const head = new THREE.Group();
   head.position.y = 1.45;
-  const headMesh = new THREE.Mesh(
-    new THREE.BoxGeometry(0.5, 0.5, 0.5),
-    new THREE.MeshBasicMaterial({ color: skin })
-  );
+  const headMesh = makeFaceMesh(0.5, 0.5, 0.5, partDefaultColors('head', shirt));
   headMesh.position.y = 0.27;
   head.add(headMesh);
-  // 顔（前=-z 側に目をつけて向きを分かりやすく。スキンを設定すると隠れる）
-  const eyeMat = new THREE.MeshBasicMaterial({ color: 0x222222 });
-  const eyes = [];
-  for (const sx of [-0.1, 0.1]) {
-    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.02), eyeMat);
-    eye.position.set(sx, 0.3, -0.26);
-    head.add(eye); eyes.push(eye);
-  }
+  drawFace(headMesh.userData.faceCanvases[5]); headMesh.userData.faceTextures[5].needsUpdate = true;
 
   // 持ち物（右手の先に出す小キューブ）
   const heldHolder = new THREE.Group();
@@ -1360,25 +1385,88 @@ function makeAvatar(shirt = 0xff5a5a) {
 
   g.add(lleg, rleg, body, larm, rarm, head);
   g.userData.parts = { head, body, headMesh, larm, rarm, lleg, rleg };
-  g.userData.skinMats = [headMesh.material, body.material,
-    larm.children[0].material, rarm.children[0].material,
-    lleg.children[0].material, rleg.children[0].material];
-  g.userData.eyes = eyes;
+  // パーツ名 → 面メッシュ（お絵描き・スキン適用に使う）
+  g.userData.faceMeshes = {
+    head: headMesh, body,
+    larm: larm.userData.faceMesh, rarm: rarm.userData.faceMesh,
+    lleg: lleg.userData.faceMesh, rleg: rleg.userData.faceMesh,
+  };
   g.userData.heldHolder = heldHolder;
   g.userData.heldId = -2;
   g.userData.anim = { phase: 0, amt: 0, mineT: 0, curYaw: 0 };
-  scene.add(g);
+  targetScene.add(g);
   return g;
 }
 
-// アバターにスキンテクスチャを貼る（全パーツ共通の絵）。tex=null で既定色に戻す
-function setAvatarSkin(g, tex) {
-  for (const m of g.userData.skinMats) {
-    m.map = tex || null;
-    if (tex) m.color.set(0xffffff);
-    m.needsUpdate = true;
+// あるアバターのスキン（全6パーツ×6面）を別アバターへ即コピー
+function copyAvatarSkin(src, dst) {
+  for (const part of SKIN_PARTS) {
+    const s = src.userData.faceMeshes[part], d = dst.userData.faceMeshes[part];
+    for (let i = 0; i < 6; i++) {
+      const c = d.userData.faceCanvases[i], cx = c.getContext('2d');
+      cx.clearRect(0, 0, FACE_RES, FACE_RES);
+      cx.drawImage(s.userData.faceCanvases[i], 0, 0);
+      d.userData.faceTextures[i].needsUpdate = true;
+    }
   }
-  for (const e of g.userData.eyes) e.visible = !tex; // スキン時は目を隠す
+}
+// 直列化：各パーツの6面を横1列(96×16)のPNGにまとめる（保存/通信用・軽量）
+function serializeAvatarSkin(av) {
+  const out = { v: 3 };
+  for (const part of SKIN_PARTS) {
+    const m = av.userData.faceMeshes[part];
+    const strip = document.createElement('canvas'); strip.width = FACE_RES * 6; strip.height = FACE_RES;
+    const sx = strip.getContext('2d');
+    for (let i = 0; i < 6; i++) sx.drawImage(m.userData.faceCanvases[i], i * FACE_RES, 0);
+    out[part] = strip.toDataURL();
+  }
+  return out;
+}
+// 復元：直列化スキンをアバターへ（画像ロードは非同期）
+function applySerializedSkin(av, skin) {
+  if (!skin || !av) return;
+  if (typeof skin === 'string') { // 旧形式（単一画像）→全面に貼る
+    const img = new Image();
+    img.onload = () => {
+      for (const part of SKIN_PARTS) {
+        const m = av.userData.faceMeshes[part];
+        for (let i = 0; i < 6; i++) {
+          const cx = m.userData.faceCanvases[i].getContext('2d');
+          cx.clearRect(0, 0, FACE_RES, FACE_RES); cx.drawImage(img, 0, 0, FACE_RES, FACE_RES);
+          m.userData.faceTextures[i].needsUpdate = true;
+        }
+      }
+    };
+    img.src = skin; return;
+  }
+  for (const part of SKIN_PARTS) {
+    const data = skin[part]; if (!data) continue;
+    const m = av.userData.faceMeshes[part];
+    const img = new Image();
+    img.onload = () => {
+      for (let i = 0; i < 6; i++) {
+        const cx = m.userData.faceCanvases[i].getContext('2d');
+        cx.clearRect(0, 0, FACE_RES, FACE_RES);
+        cx.drawImage(img, i * FACE_RES, 0, FACE_RES, FACE_RES, 0, 0, FACE_RES, FACE_RES);
+        m.userData.faceTextures[i].needsUpdate = true;
+      }
+    };
+    img.src = data;
+  }
+}
+// 既定（初期）スキンに戻す
+function resetAvatarSkin(av, shirtNum = 0x66ddaa) {
+  const shirt = hexStr(shirtNum);
+  for (const part of SKIN_PARTS) {
+    const m = av.userData.faceMeshes[part], cols = partDefaultColors(part, shirt);
+    for (let i = 0; i < 6; i++) {
+      const cx = m.userData.faceCanvases[i].getContext('2d');
+      cx.fillStyle = cols[i]; cx.fillRect(0, 0, FACE_RES, FACE_RES);
+      m.userData.faceTextures[i].needsUpdate = true;
+    }
+  }
+  drawFace(av.userData.faceMeshes.head.userData.faceCanvases[5]);
+  av.userData.faceMeshes.head.userData.faceTextures[5].needsUpdate = true;
 }
 // 名前ラベルを設定
 function setAvatarLabel(g, name) {
@@ -1438,21 +1526,12 @@ function animateAvatar(g, dt, st) {
 }
 
 // 受け取ったプロフィール（名前・スキン）。pose より前に来ても保持しておく。
-const remoteProfiles = new Map(); // id -> { name, skin(dataURL), tex }
-function skinTexFromDataURL(url) {
-  const tex = new THREE.Texture();
-  tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  const img = new Image();
-  img.onload = () => { tex.image = img; tex.needsUpdate = true; };
-  img.src = url;
-  return tex;
-}
+const remoteProfiles = new Map(); // id -> { name, skin(直列化オブジェクト) }
 function applyRemoteProfile(id) {
   const rp = remotePlayers.get(id), pr = remoteProfiles.get(id);
   if (!rp || !pr) return;
   setAvatarLabel(rp.group, pr.name || '');
-  if (pr.skin) { if (!pr.tex) pr.tex = skinTexFromDataURL(pr.skin); setAvatarSkin(rp.group, pr.tex); }
+  if (pr.skin) applySerializedSkin(rp.group, pr.skin);
 }
 
 function upsertRemotePlayer(id, state) {
@@ -1572,7 +1651,7 @@ const Net = {
   sendProfile() {
     if (!this.enabled) return;
     this.channel.send({ type: 'broadcast', event: 'profile',
-      payload: { id: this.localId, name: NET_CFG.name, skin: localSkinDataURL() } });
+      payload: { id: this.localId, name: NET_CFG.name, skin: localSkin } });
   },
   leave() {
     if (this.enabled) this.channel.send({ type: 'broadcast', event: 'leave', payload: { id: this.localId } });
@@ -1581,7 +1660,7 @@ const Net = {
 window.Net = Net; // コンソールから動作確認できるよう公開
 
 // ============================================================
-//  メニュー：スキンお絵描き／アカウント引き継ぎ／マップコード
+//  メニュー：3Dスキンお絵描き／アカウント引き継ぎ／マップコード
 // ============================================================
 // マップコード → ワールドのシード（同じコードなら全員同じ地形）
 function mapSeed(code) {
@@ -1590,36 +1669,31 @@ function mapSeed(code) {
   return h >>> 0;
 }
 
-// --- スキン（16×16ドット絵）。全パーツ共通のテクスチャとして貼る ---
-const SKIN_N = 16, BASE_COLOR = '#88c0e0';
 const PALETTE = ['#000000','#ffffff','#e74c3c','#e67e22','#f1c40f','#2ecc71',
   '#1abc9c','#3498db','#9b59b6','#e84393','#88c0e0','#8b5a2b','#95a5a6','#f0c8a0','#2c3e50','#27ae60'];
-function defaultSkinPixels() {
-  const px = new Array(SKIN_N * SKIN_N).fill(BASE_COLOR);
-  const set = (x, y, c) => px[y * SKIN_N + x] = c;
-  for (const x of [5, 6]) set(x, 6, '#222');       // 左目
-  for (const x of [9, 10]) set(x, 6, '#222');      // 右目
-  for (let x = 5; x <= 10; x++) set(x, 10, '#a33'); // 口
-  return px;
-}
-let skinPixels = defaultSkinPixels();
 
-const skinCanvas = document.getElementById('skinCanvas');
-const sctx = skinCanvas.getContext('2d');
-const localSkinTex = new THREE.CanvasTexture(skinCanvas);
-localSkinTex.magFilter = THREE.NearestFilter;
-localSkinTex.minFilter = THREE.NearestFilter;
-localSkinTex.colorSpace = THREE.SRGBColorSpace;
+// localSkin = 直列化スキン（保存/通信で使う）。編集中の正本は editorAvatar。
+let localSkin = null;
 
-function redrawLocalSkin() {
-  for (let i = 0; i < skinPixels.length; i++) {
-    sctx.fillStyle = skinPixels[i];
-    sctx.fillRect(i % SKIN_N, (i / SKIN_N) | 0, 1, 1);
+// --- スキンエディタ用の3Dビュー（メニュー内の小さなキャンバス）---
+const editorCanvas = document.getElementById('editorCanvas');
+const editorRenderer = new THREE.WebGLRenderer({ canvas: editorCanvas, antialias: true, alpha: true });
+editorRenderer.setSize(300, 300, false);
+editorRenderer.setClearColor(0x000000, 0);
+const editorScene = new THREE.Scene();
+const editorCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+editorCamera.position.set(0, 1.05, 3.6);
+editorCamera.lookAt(0, 1.0, 0);
+const editorAvatar = makeAvatar(0x66ddaa, editorScene); // ここに直接お絵描きする
+let editorYaw = 0.5;
+function editorLoop() {
+  if (overlay.style.display !== 'none') {
+    editorAvatar.rotation.y = editorYaw;
+    editorRenderer.render(editorScene, editorCamera);
   }
-  localSkinTex.needsUpdate = true;
-  setAvatarSkin(cloneMob, localSkinTex);    // 自分のクローンに反映
+  requestAnimationFrame(editorLoop);
 }
-function localSkinDataURL() { return skinCanvas.toDataURL(); }
+requestAnimationFrame(editorLoop);
 
 // --- パレット ---
 let selColor = PALETTE[2];
@@ -1636,27 +1710,58 @@ PALETTE.forEach((col) => {
   paletteEl.appendChild(s);
 });
 
-// --- お絵描き操作 ---
-let painting = false;
-function cellFromEvent(e) {
-  const r = skinCanvas.getBoundingClientRect();
-  const x = Math.floor((e.clientX - r.left) / r.width * SKIN_N);
-  const y = Math.floor((e.clientY - r.top) / r.height * SKIN_N);
-  return (x >= 0 && x < SKIN_N && y >= 0 && y < SKIN_N) ? (y * SKIN_N + x) : -1;
+// --- モード（描く / 回す）と ペンの太さ ---
+let editorMode = 'paint';   // 'paint' or 'rotate'
+let brushSize = 2;
+const modePaintBtn = document.getElementById('modePaint');
+const modeRotateBtn = document.getElementById('modeRotate');
+modePaintBtn.onclick = () => { editorMode = 'paint'; modePaintBtn.classList.add('sel'); modeRotateBtn.classList.remove('sel'); editorCanvas.style.cursor = 'crosshair'; };
+modeRotateBtn.onclick = () => { editorMode = 'rotate'; modeRotateBtn.classList.add('sel'); modePaintBtn.classList.remove('sel'); editorCanvas.style.cursor = 'grab'; };
+document.querySelectorAll('.brush').forEach((b) => {
+  b.onclick = () => { brushSize = +b.dataset.b; document.querySelectorAll('.brush').forEach(x => x.classList.remove('sel')); b.classList.add('sel'); };
+});
+
+// --- 3Dお絵描き（レイキャストで当たった面に塗る）---
+const editorRay = new THREE.Raycaster();
+let skinDirty = false;
+function paintEditor(e) {
+  const r = editorCanvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  editorRay.setFromCamera(ndc, editorCamera);
+  const hits = editorRay.intersectObjects(editorAvatar.children, true);
+  const hit = hits.find(h => h.face && h.object.userData && h.object.userData.faceCanvases);
+  if (!hit) return;
+  const i = hit.face.materialIndex;
+  const cv = hit.object.userData.faceCanvases[i], cx = cv.getContext('2d');
+  const px = Math.floor(hit.uv.x * FACE_RES), py = Math.floor((1 - hit.uv.y) * FACE_RES);
+  const half = brushSize >> 1;
+  cx.fillStyle = selColor;
+  cx.fillRect(px - half, py - half, brushSize, brushSize);
+  hit.object.userData.faceTextures[i].needsUpdate = true;
+  skinDirty = true;
 }
-function paintAt(e) { const i = cellFromEvent(e); if (i >= 0) { skinPixels[i] = selColor; redrawLocalSkin(); } }
-skinCanvas.addEventListener('pointerdown', (e) => { painting = true; paintAt(e); skinCanvas.setPointerCapture(e.pointerId); });
-skinCanvas.addEventListener('pointermove', (e) => { if (painting) paintAt(e); });
-skinCanvas.addEventListener('pointerup', () => { if (painting) { painting = false; saveCurrentProfile(); Net.sendProfile(); } });
+let editorDown = false, lastX = 0;
+editorCanvas.addEventListener('pointerdown', (e) => {
+  editorCanvas.setPointerCapture(e.pointerId); editorDown = true; lastX = e.clientX;
+  if (editorMode === 'paint') paintEditor(e);
+});
+editorCanvas.addEventListener('pointermove', (e) => {
+  if (!editorDown) return;
+  if (editorMode === 'paint') paintEditor(e);
+  else { editorYaw += (e.clientX - lastX) * 0.01; lastX = e.clientX; }
+});
+editorCanvas.addEventListener('pointerup', () => { editorDown = false; if (skinDirty) { skinDirty = false; commitSkin(); } });
 
-document.getElementById('skinEraser').onclick = () => { selColor = BASE_COLOR; [...paletteEl.children].forEach(c => c.classList.remove('sel')); };
-document.getElementById('skinClear').onclick = () => { skinPixels.fill(BASE_COLOR); redrawLocalSkin(); saveCurrentProfile(); Net.sendProfile(); };
-document.getElementById('skinRandom').onclick = () => {
-  for (let i = 0; i < skinPixels.length; i++) skinPixels[i] = PALETTE[(Math.random() * PALETTE.length) | 0];
-  redrawLocalSkin(); saveCurrentProfile(); Net.sendProfile();
-};
+// 編集結果を確定：クローンへ反映＋直列化＋保存＋配信
+function commitSkin() {
+  copyAvatarSkin(editorAvatar, cloneMob);
+  localSkin = serializeAvatarSkin(editorAvatar);
+  saveCurrentProfile();
+  Net.sendProfile();
+}
+document.getElementById('skinReset').onclick = () => { resetAvatarSkin(editorAvatar); commitSkin(); };
 
-// --- アカウント（localStorage に名前ごとのスキンを保存）---
+// --- アカウント（localStorage：名前ごとに スキン＋マップ別の持ち物 を保存）---
 const PROFILES_KEY = 'bloxd_profiles', CURRENT_KEY = 'bloxd_current';
 const nameInput = document.getElementById('nameInput');
 const loadNameInput = document.getElementById('loadNameInput');
@@ -1669,7 +1774,8 @@ function saveCurrentProfile() {
   const name = (nameInput.value.trim()) || NET_CFG.name;
   NET_CFG.name = name;
   const all = loadProfiles();
-  all[name] = { skin: skinPixels.slice() };
+  const prev = all[name] || {};
+  all[name] = { skin: localSkin, maps: prev.maps || {} };  // スキンは全マップ共通
   saveProfiles(all);
   try { localStorage.setItem(CURRENT_KEY, name); } catch (e) {}
   setAvatarLabel(cloneMob, name);
@@ -1680,7 +1786,11 @@ function loadAccount(name) {
   if (!name) return;
   const all = loadProfiles();
   const pr = all[name];
-  if (pr && pr.skin) { skinPixels = pr.skin.slice(); redrawLocalSkin(); }
+  if (pr && pr.skin) {
+    localSkin = pr.skin;
+    applySerializedSkin(editorAvatar, localSkin);
+    applySerializedSkin(cloneMob, localSkin);
+  }
   nameInput.value = name; NET_CFG.name = name;
   setAvatarLabel(cloneMob, name);
   try { localStorage.setItem(CURRENT_KEY, name); } catch (e) {}
@@ -1698,6 +1808,27 @@ function refreshAccountList() {
 document.getElementById('loadAccountBtn').onclick = () => loadAccount(loadNameInput.value);
 loadNameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') loadAccount(loadNameInput.value); });
 
+// アカウント×マップ単位で「持ち物・居場所」を保存／復元
+function saveAccountMapState() {
+  if (!worldStarted) return;
+  const name = NET_CFG.name, all = loadProfiles();
+  const pr = all[name] || (all[name] = { skin: localSkin, maps: {} });
+  pr.maps = pr.maps || {};
+  pr.maps[NET_CFG.room] = {
+    inv: slots.map(s => s ? { id: s.id, count: s.count } : null),
+    pos: [player.pos.x, player.pos.y, player.pos.z],
+  };
+  saveProfiles(all);
+}
+function restoreAccountMapState(code) {
+  const pr = loadProfiles()[NET_CFG.name];
+  if (!pr || !pr.maps || !pr.maps[code]) return false;
+  const st = pr.maps[code];
+  if (Array.isArray(st.inv)) { for (let i = 0; i < TOTAL_SLOTS; i++) slots[i] = st.inv[i] || null; updateHotbar(); }
+  if (Array.isArray(st.pos)) player.pos.set(st.pos[0], st.pos[1], st.pos[2]);
+  return true;
+}
+
 // --- プレイ開始 ---
 const playBtn = document.getElementById('playBtn');
 playBtn.onclick = () => {
@@ -1711,8 +1842,7 @@ playBtn.onclick = () => {
     overlay.style.display = 'none';
     canvas.requestPointerLock();
   } else if (code !== NET_CFG.room) {
-    // 別マップへ → URLに記録してリロード（地形をきれいに作り直す）
-    location.hash = 'map=' + encodeURIComponent(code);
+    location.hash = 'map=' + encodeURIComponent(code); // 別マップへ → リロードで作り直す
     location.reload();
   } else {
     overlay.style.display = 'none';
@@ -1727,14 +1857,23 @@ nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') playBtn.cl
   let cur = null;
   try { cur = localStorage.getItem(CURRENT_KEY); } catch (e) {}
   const all = loadProfiles();
-  if (cur && all[cur] && all[cur].skin) { skinPixels = all[cur].skin.slice(); NET_CFG.name = cur; }
+  if (cur && all[cur] && all[cur].skin) {
+    NET_CFG.name = cur;
+    localSkin = all[cur].skin;
+    applySerializedSkin(editorAvatar, localSkin);
+    applySerializedSkin(cloneMob, localSkin);
+  } else {
+    // 保存なし → 既定スキンを正本として直列化し、クローンへ
+    localSkin = serializeAvatarSkin(editorAvatar);
+    copyAvatarSkin(editorAvatar, cloneMob);
+  }
   nameInput.value = cur || NET_CFG.name;
   const hashMap = new URLSearchParams(location.hash.slice(1)).get('map');
   mapInput.value = hashMap || NET_CFG.room;
-  redrawLocalSkin();
   setAvatarLabel(cloneMob, NET_CFG.name);
   refreshAccountList();
 }
+window.addEventListener('beforeunload', saveAccountMapState);
 
 // ブロック変更の唯一の入口。ここを通すことでネット同期できる。
 //  fromNetwork=true … リモート由来の変更（送り返さない）
@@ -2491,6 +2630,9 @@ function enterWorld(code) {
   player.pos.set(0.5, sh + 2, 0.5);
   player.vel.set(0, 0, 0);
 
+  // アカウントにこのマップの記録があれば、持ち物・居場所を復元
+  restoreAccountMapState(code);
+
   if (ONLINE) Net.connect();   // DBの建築を読み込み＋リアルタイム接続
   else loadWorld();
 
@@ -2503,7 +2645,7 @@ function enterWorld(code) {
 
 let last = performance.now();
 let frames = 0, fps = 0, fpsTimer = 0;
-let netSendTimer = 0;
+let netSendTimer = 0, accSaveTimer = 0;
 
 function loop(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
@@ -2542,6 +2684,10 @@ function loop(now) {
     const nowMs = performance.now();
     for (const [pid, rp] of remotePlayers) if (nowMs - (rp.lastSeen || 0) > 4000) removeRemotePlayer(pid);
   }
+
+  // アカウント×マップの持ち物・居場所を定期保存
+  accSaveTimer += dt;
+  if (accSaveTimer >= 3) { accSaveTimer = 0; if (worldStarted) saveAccountMapState(); }
 
   // FPS表示
   frames++; fpsTimer += dt;
