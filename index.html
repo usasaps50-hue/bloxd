@@ -272,7 +272,8 @@
       <button class="mbtn" id="playBtn">▶ プレイ</button>
       <div class="hint">
         <kbd>WASD</kbd>移動 <kbd>Space</kbd>ジャンプ <kbd>マウス</kbd>視点<br>
-        <kbd>左長押し</kbd>採掘 <kbd>右/E</kbd>設置 <kbd>Tab</kbd>持ち物 <kbd>Esc</kbd>メニュー
+        <kbd>左長押し</kbd>採掘 <kbd>右/E</kbd>設置 <kbd>Tab</kbd>持ち物<br>
+        <kbd>P</kbd>視点(一人称⇆三人称) <kbd>Esc</kbd>メニュー
       </div>
     </div>
   </div>
@@ -1011,6 +1012,7 @@ const player = {
 }
 
 let yaw = 0, pitch = 0;
+let camMode = 0;   // 0=一人称, 1=三人称（自分を後ろから見る）。Pキーで切替
 const keys = {};
 
 function collide(pos) {
@@ -1072,22 +1074,35 @@ function updatePlayer(dt) {
     player.vel.set(0, 0, 0);
   }
 
-  // カメラを目の位置に
-  camera.position.set(p.x, p.y + player.eye, p.z);
+  // 視線方向
   const dir = new THREE.Vector3(
     -Math.sin(yaw) * Math.cos(pitch),
     Math.sin(pitch),
     -Math.cos(yaw) * Math.cos(pitch)
   );
-  camera.lookAt(camera.position.clone().add(dir));
+  const eyePos = new THREE.Vector3(p.x, p.y + player.eye, p.z);
+  if (camMode === 0) {
+    // 一人称：目の位置から見る
+    camera.position.copy(eyePos);
+    camera.lookAt(eyePos.clone().add(dir));
+  } else {
+    // 三人称：自分の後ろに引く（地形にめり込まないよう手前に寄せる）
+    let dist = 4.2;
+    for (; dist > 0.6; dist -= 0.3) {
+      const cx = eyePos.x - dir.x * dist, cy = eyePos.y - dir.y * dist + 0.3, cz = eyePos.z - dir.z * dist;
+      if (getBlock(Math.floor(cx), Math.floor(cy), Math.floor(cz)) === 0) { camera.position.set(cx, cy, cz); break; }
+    }
+    camera.lookAt(eyePos);
+  }
 }
 
 // ============================================================
 //  ブロックのレイキャスト（破壊・設置）
 // ============================================================
 function raycastBlock() {
-  // カメラ位置から視線方向にDDAで進み、最初に当たったブロックを返す
-  const origin = camera.position.clone();
+  // 目の位置から視線方向にDDAで進み、最初に当たったブロックを返す。
+  //  （三人称ではカメラが後ろに下がるので、カメラではなく目の位置を原点にする）
+  const origin = new THREE.Vector3(player.pos.x, player.pos.y + player.eye, player.pos.z);
   const dir = new THREE.Vector3(
     -Math.sin(yaw) * Math.cos(pitch),
     Math.sin(pitch),
@@ -1603,6 +1618,23 @@ function updateCloneMob(dt) {
   });
 }
 
+// ------------------------------------------------------------
+//  自分の本体アバター：三人称(Pキー)のとき自分の足元に表示。
+//  自分で描いたスキン・名前・持ち物がそのまま見える。
+// ------------------------------------------------------------
+const selfAvatar = makeAvatar(0x4aa3ff);
+selfAvatar.visible = false;
+function updateSelfAvatar(dt) {
+  selfAvatar.visible = (camMode === 1 && worldStarted);
+  if (!selfAvatar.visible) return;
+  selfAvatar.position.copy(player.pos);
+  const speed = Math.hypot(player.vel.x, player.vel.z);
+  setAvatarHeld(selfAvatar, slots[selected] ? slots[selected].id : -1);
+  animateAvatar(selfAvatar, dt, {
+    yaw, pitch, speed, moving: speed > 0.5, mining,
+  });
+}
+
 //  Supabase Realtime を使った通信。
 //   ・pose（位置）… Broadcast でリアルタイム配信（保存しない）
 //   ・block（設置/破壊）… Broadcast で即配信 ＋ blocks テーブルに保存（後から来た人用）
@@ -1767,6 +1799,7 @@ editorCanvas.addEventListener('pointerup', () => { editorDown = false; if (skinD
 // 編集結果を確定：クローンへ反映＋直列化＋保存＋配信
 function commitSkin() {
   copyAvatarSkin(editorAvatar, cloneMob);
+  copyAvatarSkin(editorAvatar, selfAvatar);
   localSkin = serializeAvatarSkin(editorAvatar);
   saveCurrentProfile();
   Net.sendProfile();
@@ -1792,6 +1825,7 @@ function saveCurrentProfile() {
   saveProfiles(all);
   try { localStorage.setItem(CURRENT_KEY, name); } catch (e) {}
   setAvatarLabel(cloneMob, name);
+  setAvatarLabel(selfAvatar, name);
   refreshAccountList();
 }
 function loadAccount(name) {
@@ -1803,9 +1837,11 @@ function loadAccount(name) {
     localSkin = pr.skin;
     applySerializedSkin(editorAvatar, localSkin);
     applySerializedSkin(cloneMob, localSkin);
+    applySerializedSkin(selfAvatar, localSkin);
   }
   nameInput.value = name; NET_CFG.name = name;
   setAvatarLabel(cloneMob, name);
+  setAvatarLabel(selfAvatar, name);
   try { localStorage.setItem(CURRENT_KEY, name); } catch (e) {}
   Net.sendProfile();
 }
@@ -1875,15 +1911,18 @@ nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') playBtn.cl
     localSkin = all[cur].skin;
     applySerializedSkin(editorAvatar, localSkin);
     applySerializedSkin(cloneMob, localSkin);
+    applySerializedSkin(selfAvatar, localSkin);
   } else {
-    // 保存なし → 既定スキンを正本として直列化し、クローンへ
+    // 保存なし → 既定スキンを正本として直列化し、クローン／本体へ
     localSkin = serializeAvatarSkin(editorAvatar);
     copyAvatarSkin(editorAvatar, cloneMob);
+    copyAvatarSkin(editorAvatar, selfAvatar);
   }
   nameInput.value = cur || NET_CFG.name;
   const hashMap = new URLSearchParams(location.hash.slice(1)).get('map');
   mapInput.value = hashMap || NET_CFG.room;
   setAvatarLabel(cloneMob, NET_CFG.name);
+  setAvatarLabel(selfAvatar, NET_CFG.name);
   refreshAccountList();
 }
 window.addEventListener('beforeunload', saveAccountMapState);
@@ -2216,6 +2255,9 @@ document.addEventListener('keydown', (e) => {
   }
   // E: クラフトテーブルを開く or ブロック設置（インベントリを開いていないとき）
   if (e.code === 'KeyE' && !e.repeat && document.pointerLockElement === canvas && !inventoryOpen) useOrPlace();
+
+  // P: 一人称 ⇆ 三人称（自分のキャラを後ろから見る）切替
+  if (e.code === 'KeyP' && !e.repeat) camMode = camMode === 0 ? 1 : 0;
 
   // 数字キーでホットバー選択
   if (e.code.startsWith('Digit')) {
@@ -2680,6 +2722,7 @@ function loop(now) {
   if (worldStarted) { updateChunks(dt); updateDrops(dt); } // ワールド開始後だけ
   updateRemotePlayers(dt); // 他プレイヤーを補間＋歩行/採掘モーション
   updateCloneMob(dt);      // 自分と同じ動きをするクローンモブ
+  updateSelfAvatar(dt);    // 三人称のときの自分の本体
   updateHeldView(dt); // 一人称の手／持ち物の表示・アニメ
   if (inventoryOpen && uiMode === 'furnace') { updateFurnace(dt); refreshInventoryScreen(); }
 
