@@ -241,6 +241,7 @@
         <button class="mbtn sub brush" data-b="1">細</button>
         <button class="mbtn sub brush sel" data-b="2">中</button>
         <button class="mbtn sub brush" data-b="4">太</button>
+        <button class="mbtn sub" id="skinFillAll">全部塗る</button>
         <button class="mbtn sub" id="skinReset">初期に戻す</button>
       </div>
     </div>
@@ -1468,6 +1469,17 @@ function resetAvatarSkin(av, shirtNum = 0x66ddaa) {
   drawFace(av.userData.faceMeshes.head.userData.faceCanvases[5]);
   av.userData.faceMeshes.head.userData.faceTextures[5].needsUpdate = true;
 }
+// 全パーツ・全6面（腕脚の付け根＝接続部の面も含む）を1色で塗りつぶす
+function fillAllAvatarFaces(av, color) {
+  for (const part of SKIN_PARTS) {
+    const m = av.userData.faceMeshes[part];
+    for (let i = 0; i < 6; i++) {
+      const cx = m.userData.faceCanvases[i].getContext('2d');
+      cx.fillStyle = color; cx.fillRect(0, 0, FACE_RES, FACE_RES);
+      m.userData.faceTextures[i].needsUpdate = true;
+    }
+  }
+}
 // 名前ラベルを設定
 function setAvatarLabel(g, name) {
   if (!name) { if (g.userData.nameSprite) g.userData.nameSprite.visible = false; return; }
@@ -1759,6 +1771,7 @@ function commitSkin() {
   saveCurrentProfile();
   Net.sendProfile();
 }
+document.getElementById('skinFillAll').onclick = () => { fillAllAvatarFaces(editorAvatar, selColor); commitSkin(); };
 document.getElementById('skinReset').onclick = () => { resetAvatarSkin(editorAvatar); commitSkin(); };
 
 // --- アカウント（localStorage：名前ごとに スキン＋マップ別の持ち物 を保存）---
