@@ -1605,20 +1605,6 @@ function removeRemotePlayer(id) {
 }
 
 // ------------------------------------------------------------
-//  クローンモブ：自分のすぐ横に立ち、自分とまったく同じ動き
-//  （歩行・採掘・向き・上下）をリアルタイムでコピーする。
-// ------------------------------------------------------------
-const cloneMob = makeAvatar(0x66ddaa);
-function updateCloneMob(dt) {
-  cloneMob.position.set(player.pos.x + 2, player.pos.y, player.pos.z); // 真横(東2m)
-  const speed = Math.hypot(player.vel.x, player.vel.z);
-  setAvatarHeld(cloneMob, slots[selected] ? slots[selected].id : -1);
-  animateAvatar(cloneMob, dt, {
-    yaw, pitch, speed, moving: speed > 0.5, mining,
-  });
-}
-
-// ------------------------------------------------------------
 //  自分の本体アバター：三人称(Pキー)のとき自分の足元に表示。
 //  自分で描いたスキン・名前・持ち物がそのまま見える。
 // ------------------------------------------------------------
@@ -1796,9 +1782,8 @@ editorCanvas.addEventListener('pointermove', (e) => {
 });
 editorCanvas.addEventListener('pointerup', () => { editorDown = false; if (skinDirty) { skinDirty = false; commitSkin(); } });
 
-// 編集結果を確定：クローンへ反映＋直列化＋保存＋配信
+// 編集結果を確定：自分の本体へ反映＋直列化＋保存＋配信
 function commitSkin() {
-  copyAvatarSkin(editorAvatar, cloneMob);
   copyAvatarSkin(editorAvatar, selfAvatar);
   localSkin = serializeAvatarSkin(editorAvatar);
   saveCurrentProfile();
@@ -1824,7 +1809,6 @@ function saveCurrentProfile() {
   all[name] = { skin: localSkin, maps: prev.maps || {} };  // スキンは全マップ共通
   saveProfiles(all);
   try { localStorage.setItem(CURRENT_KEY, name); } catch (e) {}
-  setAvatarLabel(cloneMob, name);
   setAvatarLabel(selfAvatar, name);
   refreshAccountList();
 }
@@ -1836,11 +1820,9 @@ function loadAccount(name) {
   if (pr && pr.skin) {
     localSkin = pr.skin;
     applySerializedSkin(editorAvatar, localSkin);
-    applySerializedSkin(cloneMob, localSkin);
     applySerializedSkin(selfAvatar, localSkin);
   }
   nameInput.value = name; NET_CFG.name = name;
-  setAvatarLabel(cloneMob, name);
   setAvatarLabel(selfAvatar, name);
   try { localStorage.setItem(CURRENT_KEY, name); } catch (e) {}
   Net.sendProfile();
@@ -1910,18 +1892,15 @@ nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') playBtn.cl
     NET_CFG.name = cur;
     localSkin = all[cur].skin;
     applySerializedSkin(editorAvatar, localSkin);
-    applySerializedSkin(cloneMob, localSkin);
     applySerializedSkin(selfAvatar, localSkin);
   } else {
-    // 保存なし → 既定スキンを正本として直列化し、クローン／本体へ
+    // 保存なし → 既定スキンを正本として直列化し、本体へ
     localSkin = serializeAvatarSkin(editorAvatar);
-    copyAvatarSkin(editorAvatar, cloneMob);
     copyAvatarSkin(editorAvatar, selfAvatar);
   }
   nameInput.value = cur || NET_CFG.name;
   const hashMap = new URLSearchParams(location.hash.slice(1)).get('map');
   mapInput.value = hashMap || NET_CFG.room;
-  setAvatarLabel(cloneMob, NET_CFG.name);
   setAvatarLabel(selfAvatar, NET_CFG.name);
   refreshAccountList();
 }
@@ -2721,7 +2700,6 @@ function loop(now) {
   }
   if (worldStarted) { updateChunks(dt); updateDrops(dt); } // ワールド開始後だけ
   updateRemotePlayers(dt); // 他プレイヤーを補間＋歩行/採掘モーション
-  updateCloneMob(dt);      // 自分と同じ動きをするクローンモブ
   updateSelfAvatar(dt);    // 三人称のときの自分の本体
   updateHeldView(dt); // 一人称の手／持ち物の表示・アニメ
   if (inventoryOpen && uiMode === 'furnace') { updateFurnace(dt); refreshInventoryScreen(); }
